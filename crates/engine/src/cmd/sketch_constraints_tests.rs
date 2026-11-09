@@ -1885,7 +1885,7 @@ fn related_constraints_group_by_the_other_entity() {
             .unwrap_or_default()
     };
     assert_eq!(of(&b), [perpendicular.clone(), corner.clone()], "{r}");
-    assert_eq!(of("pt"), [on.clone()], "a free point stands for itself: {r}");
+    assert_eq!(of("pt"), [on], "a free point stands for itself: {r}");
     assert_eq!(related.iter().find(|e| e["id"] == "pt").unwrap()["type"], "point");
     assert!(of(&free).is_empty(), "nothing ties the free line: {r}");
     assert_eq!(r["own"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect::<Vec<_>>(), [horizontal.as_str()]);

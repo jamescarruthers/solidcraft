@@ -224,7 +224,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     }
     refresh(app, &mut w);
     let t = solidcraft_theme::Tokens::get();
-    let corner = app.viewport.rect.unwrap_or_else(|| ctx.content_rect()).right_bottom() - egui::vec2(t.space_16, t.space_16);
+    // The bottom right of the view, left of the sketch palette so the palette's Finish Sketch
+    // stays in reach. It opens there; it can then be moved.
+    let view = app.viewport.rect.unwrap_or_else(|| ctx.content_rect());
+    let right = app.viewport.palette_rect.map_or(view.right() - t.space_16, |p| p.left().min(view.right()) - t.space_8);
+    let corner = egui::pos2(right, view.bottom() - t.space_16);
     let title = solidcraft_ui_text::tr("related_constraints.title");
     let mut remove: Option<String> = None;
     let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_related_constraints"), "related_constraints", title)
@@ -360,6 +364,53 @@ mod tests {
         crate::context_menu::run_item(&mut h.app, &item, egui::pos2(100.0, 100.0));
         h.frames(2);
         assert!(h.app.related_constraints.is_some());
+    }
+
+    /// With `SOLIDCRAFT_RELATED_CONSTRAINTS_EVIDENCE` set to a folder, draw the window and the
+    /// context menu as the app paints them (CPU raster, no GPU viewport) into PNGs there.
+    #[test]
+    fn evidence_pictures() {
+        let Ok(dir) = std::env::var("SOLIDCRAFT_RELATED_CONSTRAINTS_EVIDENCE") else { return };
+        let mut h = Harness::new();
+        let (a, _, _) = corner(&mut h);
+        h.app.run("sketch.dimension", json!({"entities": [a], "value": 10})).unwrap();
+        select(&mut h, &a);
+        let size = egui::vec2(1600.0, 1000.0);
+        let shoot = |h: &mut Harness, name: &str, before: &dyn Fn(&mut Harness)| {
+            h.ctx = egui::Context::default();
+            crate::fonts::setup_bundled_fonts(&h.ctx);
+            let mut textures = std::collections::HashMap::new();
+            for frame in 0..8 {
+                if frame == 3 {
+                    before(h);
+                }
+                let mut output = h.ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        time: Some(f64::from(frame) / 60.0),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        h.app.logic(ui.ctx());
+                        h.app.ui(ui);
+                    },
+                );
+                crate::ui_kit::test_textures_update(&mut textures, &output.textures_delta);
+                output.textures_delta.clear();
+                if frame == 7 {
+                    let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+                    let image = crate::ui_kit::test_raster(&h.ctx, output.shapes, output.pixels_per_point, bounds, &textures);
+                    std::fs::create_dir_all(&dir).unwrap();
+                    image.save(std::path::Path::new(&dir).join(name)).unwrap();
+                }
+            }
+        };
+        shoot(&mut h, "context-menu.png", &|h| {
+            crate::context_menu::open_for(&mut h.app, egui::pos2(700.0, 450.0), crate::context_menu::Target::Viewport);
+        });
+        crate::context_menu::close(&mut h.app);
+        h.app.start("sketch.related_constraints");
+        shoot(&mut h, "window.png", &|_| {});
     }
 
     #[test]
