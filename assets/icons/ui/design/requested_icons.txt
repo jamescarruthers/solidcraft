@@ -225,6 +225,7 @@ rect_center	false
 rect_rounded	false
 redo	false
 refold	false
+related_constraints	false
 rename	false
 render_image	false
 render_scene	false

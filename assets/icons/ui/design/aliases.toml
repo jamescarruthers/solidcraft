@@ -31,6 +31,7 @@ ground = "c_fix"
 style_shaded_edges = "style"
 
 # Same finished drawing, different semantic operation. Colours live only in palette.toml.
+related_constraints = { master = "inspect", accent = "constraint" }
 sketch_break = { master = "break", accent = "sketch" }
 sketch_cancel = { master = "close", accent = "sketch" }
 sketch_dxf = { master = "dxf", accent = "sketch" }

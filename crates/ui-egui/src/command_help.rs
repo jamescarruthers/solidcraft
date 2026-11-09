@@ -234,6 +234,7 @@ pub const DOCUMENTED: &[&str] = &[
     "sketch.rectangle.rounded",
     "sketch.rectangle.three_point",
     "sketch.rectangle.two_point",
+    "sketch.related_constraints",
     "sketch.scale",
     "sketch.slot.arc_center",
     "sketch.slot.arc_three_point",

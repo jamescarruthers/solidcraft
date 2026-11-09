@@ -1,6 +1,6 @@
 //! Contracts and result types for the commands in `cmd/sketch_constraints.rs`: the curvature and
 //! polygon constraints, the constrainer, Auto Constrain (three commands), Toggle Driven Dimension,
-//! Toggle Radius / Diameter, the constraint glyphs and Snap Inference.
+//! Toggle Radius / Diameter, the constraint glyphs, the related constraints and Snap Inference.
 //!
 //! The handlers read their parameters from the raw JSON, so each key here reads as its handler
 //! reads it and fails with the handler's message. What only the design can tell (whether a
@@ -154,6 +154,10 @@ fn driven_required(schema: &mut Schema) {
 
 fn snap_required(schema: &mut Schema) {
     require_keys(schema, &["at"]);
+}
+
+fn related_required(schema: &mut Schema) {
+    require_keys(schema, &["entities"]);
 }
 
 /// Make two curves meet with curvature continuity (G2): they must share an end point.
@@ -468,6 +472,67 @@ pub struct GlyphsResult {
     pub fully_constrained: bool,
     /// The ids of the constraints that fail.
     pub conflicts: Vec<String>,
+    /// In the warn parameter-check mode: what the call's parameters got wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_warnings: Vec<String>,
+}
+
+/// The constraints that tie some sketch curves or points to the rest of their sketch, grouped by
+/// the other curve or point each one ties them to. Changes nothing.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields, transform = related_required)]
+pub struct RelatedConstraintsParams {
+    // Optional in the type and required in the schema, as `a` above.
+    /// The sketch curve and point ids to look at: at least one.
+    #[serde(default)]
+    pub entities: Option<NameList>,
+    /// The sketch (default: the one being edited).
+    #[serde(default)]
+    pub sketch: Option<SketchTarget>,
+}
+
+/// One constraint in `sketch.related_constraints`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct RelatedConstraint {
+    /// The constraint's id: `sketch.delete` takes it.
+    pub id: String,
+    /// Its kind, such as `Coincident` or `LinearDimension`.
+    pub name: String,
+    /// Whether it is a dimension.
+    pub dimension: bool,
+    /// Whether it is driven (it measures; it does not constrain).
+    pub driven: bool,
+    /// A dimension's value (mm, or radians for an angle); `null` for another constraint.
+    pub value: Option<f64>,
+}
+
+/// Another curve or point of the sketch, and the constraints that tie it to the ones asked about.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RelatedEntity {
+    /// The curve's or the point's id.
+    pub id: String,
+    /// `line`, `circle`, `arc`, `ellipse`, `spline`, `conic` or `point`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Whether it is construction geometry.
+    pub construction: bool,
+    /// The constraints between it and the entities asked about, in the sketch's order.
+    pub constraints: Vec<RelatedConstraint>,
+}
+
+/// What `sketch.related_constraints` returns.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RelatedConstraintsResult {
+    /// The sketch's feature id.
+    pub sketch: u64,
+    /// The entities asked about, as given.
+    pub entities: Vec<String>,
+    /// The other curves and points the constraints tie them to, curves first, in the sketch's
+    /// order. A constraint on a point that belongs to curves names those curves.
+    pub related: Vec<RelatedEntity>,
+    /// The constraints on the entities asked about that name nothing else (Horizontal, Fix, a
+    /// length or a radius, or one between two of them).
+    pub own: Vec<RelatedConstraint>,
     /// In the warn parameter-check mode: what the call's parameters got wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_warnings: Vec<String>,
