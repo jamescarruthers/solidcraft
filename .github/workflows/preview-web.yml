@@ -1,6 +1,7 @@
-# A preview of the web app for testing a branch: builds apps/solidcraft-web and pushes the
-# result to the `gh-pages` branch, which GitHub Pages serves (Settings → Pages → Deploy from a
-# branch → gh-pages, / (root)). The full site (book, release channels) is pages.yml on main.
+# A preview of the web app for testing a branch: builds apps/solidcraft-web and deploys it to
+# GitHub Pages as an artifact (the app's wasm is over git's 100 MB file limit, so it cannot go on
+# a branch). Needs Settings → Pages → Source = GitHub Actions, and this branch allowed in
+# Settings → Environments → github-pages. The full site (book, release channels) is pages.yml.
 name: Preview web app
 
 on:
@@ -9,11 +10,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: preview-web
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,15 +40,16 @@ jobs:
       - name: Build the web app
         working-directory: apps/solidcraft-web
         run: trunk build --release --public-url ./
-      - name: Push the build to gh-pages
-        env:
-          SOURCE: ${{ github.sha }}
-        run: |
-          cd dist/web
-          touch .nojekyll
-          git init -q -b gh-pages
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -q -m "Web app preview of ${SOURCE}"
-          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gh-pages
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
