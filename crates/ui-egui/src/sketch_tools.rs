@@ -98,6 +98,9 @@ thread_local! {
     /// Glyphs drawn this frame (constraint id, screen centre) and the selected one.
     static GLYPHS: RefCell<Vec<(String, Pos2)>> = const { RefCell::new(Vec::new()) };
     static PICKED: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The constraint glyph under the pointer last frame (the Related Constraints window lights
+    /// its row).
+    static HOVERED: RefCell<Option<String>> = const { RefCell::new(None) };
     /// The inference the cursor snapped to last (label, sketch point), for the hint.
     static SNAP: RefCell<Option<(&'static str, Vec2)>> = const { RefCell::new(None) };
     /// The comb tool's options: comb length (a multiplier on the automatic length) and teeth.
@@ -822,6 +825,11 @@ pub fn active_glyph_deletion(app: &SolveApp, id: &str) -> Vec<solidcraft_engine:
 /// The constraint glyph under a screen position (its constraint id).
 pub fn glyph_at(pos: Pos2) -> Option<String> {
     GLYPHS.with(|g| g.borrow().iter().find(|(_, c)| c.distance(pos) <= GLYPH * 0.6).map(|(id, _)| id.clone()))
+}
+
+/// The constraint glyph under the pointer last frame.
+pub fn hovered_glyph() -> Option<String> {
+    HOVERED.with(|h| h.borrow().clone())
 }
 
 /// Constraint glyphs drawn last frame: (constraint id, screen centre).
@@ -1803,6 +1811,7 @@ fn sketch_px_per_mm(plane: &Plane, proj: &Proj) -> Option<f32> {
 }
 
 fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Pos2>) {
+    HOVERED.with(|h| *h.borrow_mut() = None);
     let Some(sid) = active_sketch(app) else { return };
     // While a dimension's value is typed, the glyphs sit where that value puts their geometry.
     let st = crate::dim_view::preview_world(app).unwrap_or_else(|| crate::open_meshing::session_world(&app.session));
@@ -1862,6 +1871,9 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
         }
     }
     let hovered = hover.and_then(|h| placed.iter().find(|(_, q, _)| q.distance(h) <= GLYPH * 0.6).map(|(id, _, _)| id.clone()));
+    HOVERED.with(|h| h.borrow_mut().clone_from(&hovered));
+    // A constraint under the pointer in the Related Constraints window lights as if hovered here.
+    let hovered = hovered.or_else(|| crate::related_constraints::hovered_constraint(app));
     // The hovered (or selected) constraint's entities lit up.
     if let Some(id) = hovered.as_ref().or(picked.as_ref()) {
         let group = glyph_group(&ss.sketch, id);
