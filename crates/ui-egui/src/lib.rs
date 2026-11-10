@@ -228,6 +228,7 @@ mod quick_measure_tests;
 pub mod recovery_ui;
 pub mod ref_images;
 pub(crate) mod refused_part;
+pub mod related_constraints;
 mod render_ui;
 pub mod render_workspace;
 pub mod resume_ui;
@@ -608,6 +609,9 @@ pub struct SolveApp {
     pub design_properties: Option<design_properties::DesignProperties>,
     /// The Sketch report window (`sketch.inspect` from the ribbon), when open.
     pub sketch_report: Option<sketch_report::SketchReport>,
+    /// The Related Constraints window (`sketch.related_constraints` from the ribbon or a
+    /// sketch entity's menu), when open.
+    pub related_constraints: Option<related_constraints::RelatedConstraints>,
     /// The Bill of Materials window, when open.
     pub bom: Option<bom_panel::BomPanel>,
     material_card_review: Option<material_card_review::ReviewWindow>,
@@ -895,6 +899,7 @@ impl SolveApp {
             params: None,
             design_properties: None,
             sketch_report: None,
+            related_constraints: None,
             bom: None,
             material_card_review: None,
             menu: context_menu::MenuState::default(),
@@ -2148,6 +2153,10 @@ impl SolveApp {
         }
         if id == "sketch.inspect" {
             sketch_report::open(self);
+            return;
+        }
+        if id == "sketch.related_constraints" {
+            related_constraints::open(self);
             return;
         }
         if id == "assembly.bom" {
@@ -3670,6 +3679,7 @@ impl SolveApp {
         params_dialog::show(self, ui.ctx());
         design_properties::show(self, ui.ctx());
         sketch_report::show(self, ui.ctx());
+        related_constraints::show(self, ui.ctx());
         bom_panel::show(self, ui.ctx());
         material_card_review::show(self, ui.ctx());
         recovery_ui::show(self, ui.ctx());

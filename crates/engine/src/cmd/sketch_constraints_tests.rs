@@ -1856,3 +1856,53 @@ fn conflict_lists_the_constraints_instead_of_claiming_the_entities_are_fixed() {
         assert!(e.contains("conflicts with"), "{cmd} {params}: {e}");
     }
 }
+
+/// `sketch.related_constraints` groups the constraints on a curve by the other curve or point
+/// each one ties it to, lists those on the curve alone apart, and changes nothing.
+#[test]
+fn related_constraints_group_by_the_other_entity() {
+    let mut s = new_sketch();
+    let a = ids(&run(&mut s, "sketch.line", json!({"points": [[0, 0], [10, 0.5]]}))["curves"])[0].clone();
+    let b = ids(&run(&mut s, "sketch.line", json!({"points": [[12, 1], [12, 10]]}))["curves"])[0].clone();
+    let free = ids(&run(&mut s, "sketch.line", json!({"points": [[30, 0], [40, 5]]}))["curves"])[0].clone();
+    run(&mut s, "sketch.point", json!({"point": [5, 3], "id": "pt"}));
+    let perpendicular = run(&mut s, "sketch.constraint.perpendicular", json!({"a": a, "b": b}))["constraint"].as_str().unwrap().to_string();
+    let horizontal = run(&mut s, "sketch.constraint.horizontal_vertical", json!({"line": a}))["constraint"].as_str().unwrap().to_string();
+    // The point onto the line, and the second line's start onto the first line's end.
+    let on = run(&mut s, "sketch.constraint.coincident", json!({"a": "pt", "b": a}))["constraint"].as_str().unwrap().to_string();
+    let corner = run(&mut s, "sketch.constraint.coincident", json!({"a": format!("{a}.end"), "b": format!("{b}.start")}))["constraint"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (before, undo) = (s.doc.to_json(), s.undo.len());
+    let r = run(&mut s, "sketch.related_constraints", json!({"entities": [a]}));
+    let related = r["related"].as_array().unwrap();
+    let of = |id: &str| -> Vec<String> {
+        related
+            .iter()
+            .find(|e| e["id"] == id)
+            .map(|e| e["constraints"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(of(&b), [perpendicular.clone(), corner.clone()], "{r}");
+    assert_eq!(of("pt"), [on], "a free point stands for itself: {r}");
+    assert_eq!(related.iter().find(|e| e["id"] == "pt").unwrap()["type"], "point");
+    assert!(of(&free).is_empty(), "nothing ties the free line: {r}");
+    assert_eq!(r["own"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect::<Vec<_>>(), [horizontal.as_str()]);
+    assert_eq!((s.doc.to_json(), s.undo.len()), (before, undo), "read-only");
+    // From the other side: the point and the second line each lead back to the first line.
+    let r = run(&mut s, "sketch.related_constraints", json!({"entities": "pt"}));
+    assert_eq!(r["related"][0]["id"], a.as_str());
+    assert_eq!(r["related"][0]["type"], "line");
+    let r = run(&mut s, "sketch.related_constraints", json!({"entities": [b]}));
+    assert_eq!(r["related"].as_array().unwrap().len(), 1, "{r}");
+    // Both lines at once: what is between them is their own.
+    let r = run(&mut s, "sketch.related_constraints", json!({"entities": [a, b]}));
+    let own: Vec<&str> = r["own"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert!(own.contains(&perpendicular.as_str()) && own.contains(&corner.as_str()), "{r}");
+    // Hostile input is refused, not a crash.
+    for bad in [json!({}), json!({"entities": []}), json!({"entities": ["nope"]}), json!({"entities": 5}), json!({"entities": [a], "sketch": "Nope"})]
+    {
+        assert!(s.execute("sketch.related_constraints", &bad).is_err(), "{bad}");
+    }
+}

@@ -1406,6 +1406,10 @@ fn sketch_entity_items(app: &SolveApp) -> Vec<Item> {
     if p == 2 && l == 1 && n == 3 {
         c.push(cmd(app, "sketch.constraint.symmetry", "Symmetry").with(json!({ "a": points[0], "b": points[1], "line": lines[0] })));
     }
+    // The window that lists what already ties the selection to the rest of the sketch.
+    if crate::related_constraints::has_constraints(&ss.sketch, &ents) {
+        c.push(cmd(app, "sketch.related_constraints", "View Related Constraints"));
+    }
     if !c.is_empty() {
         v.push(Item::heading("Constraints"));
         v.extend(c);

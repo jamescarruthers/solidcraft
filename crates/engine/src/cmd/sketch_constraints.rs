@@ -1,5 +1,7 @@
-//! More sketch constraints (curvature, polygon), constraint glyph anchors and snapping
-//! inference for interactive tools.
+//! More sketch constraints (curvature, polygon), constraint glyph anchors, the constraints
+//! related to some curves or points, and snapping inference for interactive tools.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use solidcore_record::Vec2;
@@ -12,8 +14,9 @@ use super::{CommandSpec, in_sketch};
 use crate::params::{bad, num, req_vec2, str_, string_list, vec2};
 use crate::schema::sketch_constraints::{
     AutoConstrainDatumParams, AutoConstrainParams, AutoConstrainResult, ConstrainerParams, ConstrainerResult, ConstraintAdded, CurvatureParams,
-    FinishAutoConstrainParams, Glyph, GlyphsParams, GlyphsResult, PolygonParams, PolygonResult, Snap, SnapParams, SnapResult, ToggleDiameterParams,
-    ToggleDiameterResult, ToggleDrivenParams, ToggleDrivenResult,
+    FinishAutoConstrainParams, Glyph, GlyphsParams, GlyphsResult, PolygonParams, PolygonResult, RelatedConstraint, RelatedConstraintsParams,
+    RelatedConstraintsResult, RelatedEntity, Snap, SnapParams, SnapResult, ToggleDiameterParams, ToggleDiameterResult, ToggleDrivenParams,
+    ToggleDrivenResult,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{EngineError, Result, Session};
@@ -28,6 +31,7 @@ const CONSTRAINER_CONTRACT: TypedContract<ConstrainerParams> = TypedContract::ne
 const TOGGLE_DRIVEN_CONTRACT: TypedContract<ToggleDrivenParams> = TypedContract::new();
 const GLYPHS_CONTRACT: TypedContract<GlyphsParams> = TypedContract::new();
 const SNAP_CONTRACT: TypedContract<SnapParams> = TypedContract::new();
+const RELATED_CONTRACT: TypedContract<RelatedConstraintsParams> = TypedContract::new();
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("sketch.constraint.curvature", "Curvature", crate::checked!("sketch.constraint.curvature", c_smooth))
@@ -89,6 +93,19 @@ pub static COMMANDS: &[CommandSpec] = &[
         .contract(&GLYPHS_CONTRACT)
         .output(output_schema_for::<GlyphsResult>)
         .params("sketch?: id|name: every constraint with where to draw its glyph (sketch coordinates)"),
+    CommandSpec::new("sketch.related_constraints", "View Related Constraints", crate::checked!("sketch.related_constraints", related_constraints))
+        .at("SKETCH", "CONSTRAINTS")
+        .icon("related_constraints")
+        .enabled(in_sketch)
+        .noundo()
+        .contract(&RELATED_CONTRACT)
+        .output(output_schema_for::<RelatedConstraintsResult>)
+        .params(
+            "entities: [sketch curve or point ids] (1 or more); sketch?: id|name (default active) → related: [{id, type, construction, \
+             constraints: [{id, name, dimension, driven, value}]}], the other curves and points each constraint on the entities ties \
+             them to (a point of a curve stands for that curve), and own: the constraints that name nothing else. Read-only; \
+             `sketch.delete` removes a constraint by its id. The ribbon opens a window that follows the selection",
+        ),
     CommandSpec::new("sketch.snap", "Snap Inference", crate::checked!("sketch.snap", snap)).icon("snap")
         .enabled(in_sketch)
         .noundo()
@@ -616,6 +633,113 @@ fn glyphs(s: &mut Session, p: &Value) -> Result<Value> {
         param_warnings: Vec::new(),
     };
     reply("sketch.glyphs", result)
+}
+
+/// Most entities `sketch.related_constraints` looks at in one call.
+const MAX_RELATED_ENTITIES: usize = 1000;
+
+/// Another curve or point of the sketch a constraint ties the entities asked about to, by index.
+/// Curves sort before points, each in the sketch's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Other {
+    Curve(usize),
+    Point(usize),
+}
+
+/// The curve kind as `sketch.related_constraints` names it.
+fn curve_type(kind: &CurveKind) -> &'static str {
+    match kind {
+        CurveKind::Line { .. } => "line",
+        CurveKind::Circle { .. } => "circle",
+        CurveKind::Arc { .. } => "arc",
+        CurveKind::Ellipse { .. } => "ellipse",
+        CurveKind::Spline { .. } => "spline",
+        CurveKind::Conic { .. } => "conic",
+    }
+}
+
+/// `sketch.related_constraints`: every constraint on the given curves and points, grouped by the
+/// other curve or point it ties them to. A constraint on an asked curve's own point (a coincident
+/// at a line's end) counts as on that curve; a point of another curve stands for that curve.
+fn related_constraints(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "sketch.related_constraints";
+    let ents = string_list(cmd, p, "entities")?;
+    if ents.is_empty() {
+        return Err(bad(cmd, "`entities` must list one or more sketch curve or point ids"));
+    }
+    if ents.len() > MAX_RELATED_ENTITIES {
+        return Err(bad(cmd, format!("`entities` must list at most {MAX_RELATED_ENTITIES} ids")));
+    }
+    let id = sketch_store::target(s, p, cmd)?;
+    let st = s.model.state();
+    let ss = st.sketch(id).ok_or_else(|| EngineError::Other("that sketch is not evaluated".into()))?;
+    let sk = &ss.sketch;
+    let mut curves = BTreeSet::new();
+    let mut points = BTreeSet::new();
+    for e in &ents {
+        if let Some(c) = sk.curve_index(e) {
+            curves.insert(c);
+        } else if let Some(q) = sk.resolve_point(e) {
+            points.insert(q);
+        } else {
+            return Err(bad(cmd, format!("`{e}` is not a curve or a point of that sketch")));
+        }
+    }
+    // The points the asked entities hold: their own, and those of the asked curves.
+    let held: BTreeSet<usize> =
+        points.iter().copied().chain(curves.iter().flat_map(|&c| sk.curves.get(c).map(|x| x.kind.point_ids()).unwrap_or_default())).collect();
+    let mut related: BTreeMap<Other, Vec<RelatedConstraint>> = BTreeMap::new();
+    let mut own = Vec::new();
+    for c in &sk.constraints {
+        let (pts, mut crvs) = c.kind.indices();
+        // An offset's dimension names its output curve by id, not by index.
+        if let ConstraintKind::OffsetDistance { output, .. } = &c.kind
+            && let Some(i) = sk.curve_index(output)
+        {
+            crvs.push(i);
+        }
+        if !crvs.iter().any(|i| curves.contains(i)) && !pts.iter().any(|q| held.contains(q)) {
+            continue;
+        }
+        let mut others: BTreeSet<Other> = crvs.iter().filter(|i| !curves.contains(i)).map(|&i| Other::Curve(i)).collect();
+        for q in pts.into_iter().filter(|q| !held.contains(q)) {
+            let owners: Vec<usize> = sk.curves.iter().enumerate().filter(|(_, x)| x.kind.uses(q)).map(|(i, _)| i).collect();
+            if owners.is_empty() {
+                others.insert(Other::Point(q));
+            }
+            // An owner the call asked about is not another entity: the constraint is its own.
+            others.extend(owners.into_iter().filter(|i| !curves.contains(i)).map(Other::Curve));
+        }
+        let item = RelatedConstraint {
+            id: c.id.clone(),
+            name: c.kind.name().to_string(),
+            dimension: c.kind.is_dimension(),
+            driven: c.driven,
+            value: c.kind.value(),
+        };
+        if others.is_empty() {
+            own.push(item);
+        } else {
+            for other in others {
+                related.entry(other).or_default().push(item.clone());
+            }
+        }
+    }
+    let related = related
+        .into_iter()
+        .filter_map(|(other, constraints)| match other {
+            Other::Curve(i) => sk.curves.get(i).map(|x| RelatedEntity {
+                id: x.id.clone(),
+                kind: curve_type(&x.kind).to_string(),
+                construction: x.construction,
+                constraints,
+            }),
+            Other::Point(i) => {
+                sk.points.get(i).map(|x| RelatedEntity { id: x.id.clone(), kind: "point".to_string(), construction: false, constraints })
+            }
+        })
+        .collect();
+    reply(cmd, RelatedConstraintsResult { sketch: id, entities: ents, related, own, param_warnings: Vec::new() })
 }
 
 /// Snap inference for a click at `at`: the nearest sketch point (coincident), the midpoint of a
