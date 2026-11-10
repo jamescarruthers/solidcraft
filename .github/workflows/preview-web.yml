@@ -50,6 +50,10 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    timeout-minutes: 40
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          # Pages can take more than the default 10 minutes to sync the app's 146 MB wasm.
+          timeout: 1800000
