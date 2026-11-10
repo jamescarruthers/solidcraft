@@ -4,8 +4,9 @@
 //! curves and points constraints tie that one to in turn (rows start folded; an entity already
 //! higher on the branch is left out, so a loop of constraints ends). Hovering a row lights its
 //! entity in the sketch, and hovering a constraint lights its glyph; the entity or glyph under the
-//! pointer in the sketch lights its row and constraint here. The window stays open and follows
-//! the selection. `ui.start` of `sketch.related_constraints` (the SKETCH tab's Constrain menu, or
+//! pointer in the sketch lights its row and constraint here. A click on a row selects its entity
+//! (Ctrl or Shift adds it to the selection, or takes it out) and keeps the tree as it is. The
+//! window stays open and follows the selection made in the sketch: that becomes the root. `ui.start` of `sketch.related_constraints` (the SKETCH tab's Constrain menu, or
 //! the context menu of a sketch curve or point) opens it; `engine.execute` only returns the
 //! JSON. It closes when the sketch is finished.
 
@@ -91,6 +92,9 @@ pub struct RelatedConstraints {
     pub rows: Option<Result<Vec<TreeRow>, String>>,
     /// What the pointer was over in the window last frame.
     pub hovered: Option<Hover>,
+    /// The selection a click on a row made: it keeps the tree's root, where a selection made in
+    /// the sketch becomes the root.
+    own_selection: Option<Vec<String>>,
 }
 
 /// The selected curves and points of the sketch being edited, in selection order.
@@ -134,6 +138,7 @@ pub fn open(app: &mut SolveApp) {
         cache_key: None,
         rows: None,
         hovered: None,
+        own_selection: None,
     });
 }
 
@@ -145,6 +150,17 @@ pub fn hovered_constraint(app: &SolveApp) -> Option<String> {
     }
 }
 
+/// The selection item of a curve or point of the sketch being edited.
+fn entity_sel(app: &SolveApp, id: &str) -> Option<Sel> {
+    let st = crate::open_meshing::session_world(&app.session);
+    let ss = app.session.active_sketch.and_then(|s| st.sketch(s))?;
+    if ss.sketch.curve_index(id).is_some() {
+        Some(Sel::SketchCurve { id: id.to_string(), sketch: None })
+    } else {
+        ss.sketch.resolve_point(id).map(|_| Sel::SketchPoint { id: id.to_string() })
+    }
+}
+
 /// The entity of the row under the pointer in the window is the sketch's hover, as if the
 /// pointer were over it there. Called by the viewport after it works out its own hover.
 pub(crate) fn hover_override(app: &mut SolveApp) {
@@ -152,16 +168,26 @@ pub(crate) fn hover_override(app: &mut SolveApp) {
         Some(Hover::Entity(id) | Hover::Constraint { entity: id, .. }) => id.clone(),
         None => return,
     };
-    let st = crate::open_meshing::session_world(&app.session);
-    let Some(ss) = app.session.active_sketch.and_then(|s| st.sketch(s)) else { return };
-    let sel = if ss.sketch.curve_index(&id).is_some() {
-        Sel::SketchCurve { id, sketch: None }
-    } else if ss.sketch.resolve_point(&id).is_some() {
-        Sel::SketchPoint { id }
+    if let Some(sel) = entity_sel(app, &id) {
+        app.viewport.hover = crate::viewport::sel_hit(app, &sel);
+    }
+}
+
+/// Select the entity of a clicked row: alone, or with `add` added to the selection (taken out
+/// when it is in it already). One `select.set`, so it is what a click in the sketch would do.
+fn select(app: &mut SolveApp, w: &mut RelatedConstraints, id: &str, add: bool) {
+    let Some(sel) = entity_sel(app, id) else { return };
+    let mut items: Vec<Sel> = if add { app.session.selection.clone() } else { Vec::new() };
+    if let Some(at) = items.iter().position(|s| *s == sel) {
+        items.remove(at);
     } else {
-        return;
-    };
-    app.viewport.hover = crate::viewport::sel_hit(app, &sel);
+        items.push(sel);
+    }
+    let items: Vec<Value> = items.iter().filter_map(|s| serde_json::to_value(s).ok()).collect();
+    match app.run("select.set", json!({ "items": items })) {
+        Ok(_) => w.own_selection = Some(selected_entities(app)),
+        Err(e) => app.set_status(crate::friendly_error("select.set", &e), true),
+    }
 }
 
 /// The entity under the pointer in the sketch, if it is a curve or point of the sketch.
@@ -378,10 +404,11 @@ pub fn refresh(app: &mut SolveApp, w: &mut RelatedConstraints) {
         w.entities.clear();
     }
     let selected = selected_entities(app);
-    if !selected.is_empty() && selected != w.entities {
+    if !selected.is_empty() && selected != w.entities && w.own_selection.as_ref() != Some(&selected) {
         w.entities = selected;
         w.root_open = true;
         w.open.clear();
+        w.own_selection = None;
     }
     // Forget entities the sketch no longer has (deleted, or undone).
     let st = crate::open_meshing::session_world(&app.session);
@@ -403,6 +430,8 @@ pub fn refresh(app: &mut SolveApp, w: &mut RelatedConstraints) {
 #[derive(Default)]
 struct RowOut {
     fold: bool,
+    /// The row was clicked: select its entity, adding it with Ctrl or Shift.
+    select: Option<bool>,
     remove: Option<String>,
     hovered: Option<Hover>,
 }
@@ -414,8 +443,9 @@ fn row_key(row: &TreeRow) -> String {
 
 /// Draw one row: fold arrow, icon, the entity's name, then each constraint with its remove
 /// button, wrapping onto more lines when they do not fit. `lit` marks the row of the entity
-/// under the pointer in the sketch, `lit_constraint` the constraint whose glyph is.
-fn draw_row(ui: &mut egui::Ui, row: &TreeRow, lit: bool, lit_constraint: Option<&str>) -> RowOut {
+/// under the pointer in the sketch, `lit_constraint` the constraint whose glyph is, `selected`
+/// a row whose entity is selected.
+fn draw_row(ui: &mut egui::Ui, row: &TreeRow, lit: bool, lit_constraint: Option<&str>, selected: bool) -> RowOut {
     let t = solidcraft_theme::Tokens::get();
     let h = ui_kit::row_height();
     let key = row_key(row);
@@ -454,8 +484,18 @@ fn draw_row(ui: &mut egui::Ui, row: &TreeRow, lit: bool, lit_constraint: Option<
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, h * (line + 1) as f32), egui::Sense::hover());
     solidcraft_ui_registry::publish_rect(&format!("related:row:{key}"), rect);
     let mut out = RowOut::default();
+    // The row's click, under the fold arrow and the remove buttons made after it.
+    if row.depth > 0 {
+        let click = ui.interact(rect, ui.scope_id().with(("related_row", &key)), egui::Sense::click());
+        if click.clicked() {
+            out.select = Some(ui.input(|i| i.modifiers.ctrl || i.modifiers.shift || i.modifiers.command));
+        }
+        solidcraft_ui_registry::publish_handle(&format!("related:select:{key}"), egui::pos2(name_x + t.space_4, rect.top() + h / 2.0));
+    }
     let over_row = ui.rect_contains_pointer(rect);
-    if over_row || lit {
+    if selected {
+        ui.painter().rect_filled(rect, t.radius_sm.saturating_sub(1), solidcraft_theme::TabAccent::current(ui.ctx()).soft);
+    } else if over_row || lit {
         ui.painter().rect_filled(rect, t.radius_sm.saturating_sub(1), t.hover);
     }
     if lit {
@@ -537,6 +577,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let mut remove: Option<String> = None;
     let mut fold: Option<Vec<String>> = None;
     let mut hovered: Option<Hover> = None;
+    let mut picked: Option<(String, bool)> = None;
+    let chosen = selected_entities(app);
     let (closed, action) = ui_kit::Window::new(egui::Id::unique("sc_related_constraints"), "related_constraints", title)
         .placed(egui::Align2::RIGHT_BOTTOM, corner)
         // Wide enough for an entity and two or three constraints on one line.
@@ -554,9 +596,13 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for row in rows {
                     let lit = row.depth > 0 && lit.as_ref().is_some_and(|id| row.entities.contains(id));
-                    let out = draw_row(ui, row, lit, lit_constraint.as_deref());
+                    let selected = row.depth > 0 && row.entities.iter().any(|e| chosen.contains(e));
+                    let out = draw_row(ui, row, lit, lit_constraint.as_deref(), selected);
                     if out.fold {
                         fold = Some(row.path.clone());
+                    }
+                    if let (Some(add), Some(id)) = (out.select, row.entities.first()) {
+                        picked = Some((id.clone(), add));
                     }
                     if out.remove.is_some() {
                         remove = out.remove;
@@ -571,6 +617,9 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             }
         });
     w.hovered = hovered;
+    if let Some((id, add)) = picked {
+        select(app, &mut w, &id, add);
+    }
     if let Some(path) = fold {
         if path.is_empty() {
             w.root_open = !w.root_open;
@@ -667,6 +716,34 @@ mod tests {
         h.app.run("sketch.finish", json!({})).unwrap();
         h.frames(2);
         assert!(h.app.related_constraints.is_none());
+    }
+
+    #[test]
+    fn a_click_on_a_row_selects_its_entity_and_keeps_the_tree() {
+        let mut h = Harness::new();
+        let (a, b, c, free) = chain(&mut h);
+        select(&mut h, &a);
+        h.step(&json!({"start": "sketch.related_constraints"})).unwrap();
+        h.frames(3);
+        click(&mut h, &format!("related:fold:{b}"));
+        click(&mut h, &format!("related:select:{b}"));
+        assert_eq!(super::selected_entities(&h.app), vec![b.clone()], "the click selects the second line");
+        let tree = rows(&h);
+        assert!(tree[0].label.contains(&a), "the root stays the first line: {tree:?}");
+        assert!(tree.iter().any(|r| r.path == [b.clone(), c.clone()]), "and the tree stays open: {tree:?}");
+        // Ctrl adds the third line, and a second Ctrl-click takes it out again.
+        let at = crate::scenario::handle_at(&format!("related:select:{b}/{c}")).unwrap();
+        h.step(&json!({"click": [at.x, at.y], "ctrl": true})).unwrap();
+        h.frames(2);
+        assert_eq!(super::selected_entities(&h.app), vec![b.clone(), c.clone()]);
+        h.step(&json!({"click": [at.x, at.y], "ctrl": true})).unwrap();
+        h.frames(2);
+        assert_eq!(super::selected_entities(&h.app), vec![b.clone()]);
+        assert!(rows(&h)[0].label.contains(&a), "the root is still the first line");
+        // A selection made in the sketch becomes the root.
+        select(&mut h, &free);
+        h.frames(2);
+        assert!(rows(&h)[0].label.contains(&free));
     }
 
     #[test]
